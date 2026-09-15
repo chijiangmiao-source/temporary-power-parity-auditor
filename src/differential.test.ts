@@ -88,11 +88,15 @@ describe('差分测试：线段树+可回滚并查集 vs 暴力染色', () => {
     for (const seed of seeds) {
       const json = JSON.stringify({ operations: generate(seed) });
       const result = analyze(json);
-      for (const c of result.checks) {
-        if (!c.safe && c.witness) {
-          const xor =
-            c.witness.path.reduce((acc, e) => acc ^ e.parity, 0) ^ c.witness.closing.parity;
-          expect(xor).toBe(1);
+      for (let i = 0; i < result.checks.length; i++) {
+        const c = result.checks[i];
+        if (!c.safe) {
+          const witness = result.getWitness(i);
+          if (witness) {
+            const xor =
+              witness.path.reduce((acc, e) => acc ^ e.parity, 0) ^ witness.closing.parity;
+            expect(xor).toBe(1);
+          }
         }
       }
     }

@@ -62,7 +62,6 @@ export interface CheckOutcome {
   /** 第几个检查点（1 基，按原序） */
   seq: number;
   safe: boolean;
-  witness: ConflictWitness | null;
 }
 
 export interface AnalyzeResult {
@@ -71,4 +70,10 @@ export interface AnalyzeResult {
   checks: CheckOutcome[];
   /** 最早冲突在 checks 中的下标 */
   firstConflict: number;
+  /**
+   * 按需计算某检查点的奇环证据（结果缓存）。
+   * 连续冲突且检查点很多时，不预计算全部证据，避免界面卡顿；
+   * safe 检查点恒返回 null。
+   */
+  getWitness: (checkIndex: number) => ConflictWitness | null;
 }

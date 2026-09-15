@@ -20,7 +20,7 @@ describe('analyze 端到端行为', () => {
     ]);
     expect(r.checks[0].safe).toBe(false);
     expect(r.firstConflict).toBe(0);
-    expect(r.checks[0].witness?.closing.id).toBe('3');
+    expect(r.getWitness(0)?.closing.id).toBe('3');
   });
 
   it('终局接线看不出矛盾，但中途检查点能定位（remove 之后恢复 safe）', () => {

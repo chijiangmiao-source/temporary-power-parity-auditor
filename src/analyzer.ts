@@ -83,8 +83,16 @@ interface AdjEdge {
  * 约束按 add 序位加入，证据具有确定性。
  */
 export function findConflictWitness(constraints: Constraint[], time: number): ConflictWitness | null {
-  const { nodes, index } = internNodes(constraints);
-  const n = Math.max(1, nodes.length);
+  return findConflictWitnessWith(internNodes(constraints), constraints, time);
+}
+
+function findConflictWitnessWith(
+  interned: { index: Map<string, number>; nodes: string[] },
+  constraints: Constraint[],
+  time: number,
+): ConflictWitness | null {
+  const { index } = interned;
+  const n = Math.max(1, interned.nodes.length);
   const dsu = new RollbackParityDSU();
   dsu.reset(n);
   const adj: AdjEdge[][] = Array.from({ length: n }, () => []);
@@ -140,18 +148,36 @@ export function findConflictWitness(constraints: Constraint[], time: number): Co
 export function analyze(jsonText: string): AnalyzeResult {
   const { operations, constraints, issues, checkIndices } = parseOperations(jsonText);
   if (issues.length > 0) {
-    return { ok: false, issues, checks: [], firstConflict: -1 };
+    return {
+      ok: false,
+      issues,
+      checks: [],
+      firstConflict: -1,
+      getWitness: () => null,
+    };
   }
 
+  // 主判定：一次时间分段树 DFS 出全部检查点的 safe/conflict。
   const verdicts = solveOperations(operations, constraints, checkIndices);
 
   const checks: CheckOutcome[] = checkIndices.map((opIndex, i) => ({
     index: opIndex,
     seq: i + 1,
     safe: verdicts[i],
-    witness: verdicts[i] ? null : findConflictWitness(constraints, opIndex),
   }));
 
   const firstConflict = checks.findIndex((c) => !c.safe);
-  return { ok: true, issues: [], checks, firstConflict };
+
+  // 证据按需计算并缓存：冲突连续、检查点很多时，不展开的检查点零成本。
+  const interned = internNodes(constraints);
+  const witnessCache = new Map<number, ConflictWitness | null>();
+  const getWitness = (i: number): ConflictWitness | null => {
+    if (checks[i]?.safe) return null;
+    if (!witnessCache.has(i)) {
+      witnessCache.set(i, findConflictWitnessWith(interned, constraints, checks[i].index));
+    }
+    return witnessCache.get(i) ?? null;
+  };
+
+  return { ok: true, issues: [], checks, firstConflict, getWitness };
 }
