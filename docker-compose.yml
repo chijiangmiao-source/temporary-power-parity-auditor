@@ -1,0 +1,27 @@
+# 施工临电相位约束按序复核 —— 纯前端
+services:
+  # 页面服务：docker compose up web 后访问 http://localhost:${WEB_PORT}
+  web:
+    build:
+      context: .
+      target: web
+    image: temp-power-web:latest
+    ports:
+      # 宿主端口可用 WEB_PORT 覆盖，默认 8080
+      - "${WEB_PORT:-8080}:80"
+
+  # 一次性验收服务：Vitest 差分测试 + 构建 + Playwright 端到端测试
+  # 用法：docker compose run --rm verify
+  verify:
+    build:
+      context: .
+      target: verify
+    image: temp-power-verify:latest
+    environment:
+      # 指向同 compose 网络中的 web 容器
+      PLAYWRIGHT_BASE_URL: http://web:80
+    depends_on:
+      web:
+        condition: service_healthy
+    profiles:
+      - verify

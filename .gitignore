@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# 测试产物
+coverage/
+playwright-report/
+test-results/
+
+# 编辑器与系统文件
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.local
+*.log
+
+# 锁文件以外的环境变量
+.env
+.env.*
+!.env.example
