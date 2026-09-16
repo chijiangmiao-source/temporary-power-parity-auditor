@@ -195,6 +195,191 @@ test.describe('大规模输入性能', () => {
   });
 });
 
+test.describe('精炼最短回路：用户触发、缓存与失效', () => {
+  const triangleOps = (extra: any[] = []) => ({
+    operations: [
+      { type: 'add', id: 'a1', a: 'A', b: 'B', relation: 'same' },
+      { type: 'add', id: 'a2', a: 'B', b: 'C', relation: 'same' },
+      { type: 'add', id: 'a3', a: 'A', b: 'C', relation: 'opposite' },
+      ...extra,
+      { type: 'check' },
+    ],
+  });
+
+  test('点击后才计算精炼回路，展示最短长度与规范化序列，再点收起', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('json-input').fill(JSON.stringify(triangleOps()));
+    const item = page.getByTestId('check-item').nth(0);
+
+    // 默认不展开精炼结果，只提供触发按钮
+    await expect(item).not.toContainText('精炼最短回路：');
+    const btn = item.getByTestId('refine-cycle');
+    await expect(btn).toContainText('精炼最短回路');
+
+    await btn.click();
+    const panel = item.getByTestId('refined-panel');
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText('共 3 条约束');
+    // 规范化 id 序列字典序最小：c-a… 类 id 中 a1 居首
+    await expect(item.getByTestId('refined-canonical')).toContainText('a1');
+    await expect(item.getByTestId('refined-canonical')).toContainText('a3');
+    // 链与闭合边、异或校验齐全
+    await expect(item.getByTestId('refined-closing')).toContainText('= 1');
+
+    // 再点收起
+    await btn.click();
+    await expect(panel).toHaveCount(0);
+
+    // 重新展开：按检查点缓存，内容稳定
+    await btn.click();
+    await expect(item.getByTestId('refined-panel')).toBeVisible();
+    await expect(item.getByTestId('refined-panel')).toContainText('共 3 条约束');
+  });
+
+  test('反相自环精炼为长度 1 的闭合边', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('json-input').fill(
+      JSON.stringify({
+        operations: [
+          { type: 'add', id: 'loop', a: 'A', b: 'A', relation: 'opposite' },
+          { type: 'check' },
+        ],
+      }),
+    );
+    const item = page.getByTestId('check-item').nth(0);
+    await item.getByTestId('refine-cycle').click();
+    await expect(item.getByTestId('refined-panel')).toContainText('共 1 条约束');
+    await expect(item.getByTestId('refined-selfloop')).toContainText('loop');
+  });
+
+  test('默认奇环夹带绕行支路时，精炼结果截到真正的最短环', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('json-input').fill(
+      JSON.stringify({
+        operations: [
+          { type: 'add', id: 'det1', a: 'A', b: 'D', relation: 'same' },
+          { type: 'add', id: 'det2', a: 'D', b: 'E', relation: 'same' },
+          { type: 'add', id: 'det3', a: 'E', b: 'C', relation: 'opposite' },
+          { type: 'add', id: 'sh1', a: 'A', b: 'B', relation: 'same' },
+          { type: 'add', id: 'sh2', a: 'B', b: 'C', relation: 'same' },
+          { type: 'add', id: 'close', a: 'A', b: 'C', relation: 'opposite' },
+          { type: 'check' },
+        ],
+      }),
+    );
+    const item = page.getByTestId('check-item').nth(0);
+    // 自动展开的默认奇环受 add 顺序影响，夹带绕行支路
+    await expect(item.locator('.witness').first()).toContainText('det1');
+
+    await item.getByTestId('refine-cycle').click();
+    const panel = item.getByTestId('refined-panel');
+    await expect(panel).toContainText('共 3 条约束');
+    await expect(panel).toContainText('sh1');
+    await expect(panel).not.toContainText('det1');
+    await expect(panel).not.toContainText('det2');
+    await expect(panel).not.toContainText('det3');
+  });
+
+  test('连续冲突时每个 conflict 行都可独立触发精炼', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('json-input').fill(
+      JSON.stringify({
+        operations: [
+          { type: 'add', id: 'a1', a: 'A', b: 'B', relation: 'same' },
+          { type: 'add', id: 'a2', a: 'B', b: 'C', relation: 'same' },
+          { type: 'add', id: 'a3', a: 'A', b: 'C', relation: 'opposite' },
+          { type: 'check' },
+          { type: 'check' },
+          { type: 'check' },
+        ],
+      }),
+    );
+    await expect(page.getByTestId('refine-cycle')).toHaveCount(3);
+    const second = page.getByTestId('check-item').nth(1);
+    await expect(second.getByTestId('refined-panel')).toHaveCount(0);
+    await second.getByTestId('refine-cycle').click();
+    await expect(second.getByTestId('refined-panel')).toBeVisible();
+    // 其他行不被连带展开
+    await expect(page.getByTestId('check-item').nth(0).getByTestId('refined-panel')).toHaveCount(0);
+    await expect(page.getByTestId('check-item').nth(2).getByTestId('refined-panel')).toHaveCount(0);
+  });
+
+  test('输入变化后旧精炼结果清除并提示重新触发；safe 行无精炼入口', async ({ page }) => {
+    await page.goto('/');
+    const input = page.getByTestId('json-input');
+    await input.fill(JSON.stringify(triangleOps()));
+    const item = page.getByTestId('check-item').nth(0);
+    await item.getByTestId('refine-cycle').click();
+    await expect(item.getByTestId('refined-panel')).toBeVisible();
+    await expect(page.getByTestId('refine-hint')).toHaveCount(0);
+
+    // 改为全部 safe：旧结果清除，conflict 行消失，无需重新触发提示
+    await input.fill(
+      JSON.stringify({
+        operations: [
+          { type: 'add', id: 'a1', a: 'A', b: 'B', relation: 'same' },
+          { type: 'add', id: 'a2', a: 'B', b: 'C', relation: 'same' },
+          { type: 'check' },
+        ],
+      }),
+    );
+    await expect(page.getByTestId('refined-panel')).toHaveCount(0);
+    await expect(page.getByTestId('refine-cycle')).toHaveCount(0);
+    await expect(page.getByTestId('refine-hint')).toHaveCount(0);
+    await expect(page.getByTestId('check-item').nth(0)).toHaveAttribute('data-safe', 'true');
+
+    // 再次输入冲突：旧缓存不复活，提示重新触发，点击后才展示新结果
+    await input.fill(JSON.stringify(triangleOps()));
+    await expect(page.getByTestId('refined-panel')).toHaveCount(0);
+    const hint = page.getByTestId('refine-hint');
+    await expect(hint).toBeVisible();
+    await expect(hint).toContainText('重新点击');
+
+    const conflictItem = page.getByTestId('check-item').nth(0);
+    await conflictItem.getByTestId('refine-cycle').click();
+    await expect(conflictItem.getByTestId('refined-panel')).toBeVisible();
+    await expect(page.getByTestId('refine-hint')).toHaveCount(0);
+  });
+
+  test('目标检查点随 remove 不再 conflict 时旧精炼结果不复活', async ({ page }) => {
+    await page.goto('/');
+    const input = page.getByTestId('json-input');
+    await input.fill(
+      JSON.stringify({
+        operations: [
+          { type: 'add', id: 'a1', a: 'A', b: 'B', relation: 'same' },
+          { type: 'add', id: 'a2', a: 'B', b: 'C', relation: 'same' },
+          { type: 'add', id: 'a3', a: 'A', b: 'C', relation: 'opposite' },
+          { type: 'check' },
+        ],
+      }),
+    );
+    const item = page.getByTestId('check-item').nth(0);
+    await item.getByTestId('refine-cycle').click();
+    await expect(item.getByTestId('refined-panel')).toBeVisible();
+
+    // 拆除致矛盾约束：该检查点序列变为 safe → conflict，旧精炼随结果整体失效
+    await input.fill(
+      JSON.stringify({
+        operations: [
+          { type: 'add', id: 'a1', a: 'A', b: 'B', relation: 'same' },
+          { type: 'add', id: 'a2', a: 'B', b: 'C', relation: 'same' },
+          { type: 'add', id: 'a3', a: 'A', b: 'C', relation: 'opposite' },
+          { type: 'check' },
+          { type: 'remove', id: 'a3' },
+          { type: 'check' },
+        ],
+      }),
+    );
+    await expect(page.getByTestId('refined-panel')).toHaveCount(0);
+    const items = page.getByTestId('check-item');
+    await expect(items.nth(0)).toHaveAttribute('data-safe', 'false');
+    await expect(items.nth(1)).toHaveAttribute('data-safe', 'true');
+    // 第二行是 safe，不提供精炼入口
+    await expect(items.nth(1).getByTestId('refine-cycle')).toHaveCount(0);
+  });
+});
+
 test.describe('导入文件', () => {
   test('通过文件选择器导入 JSON 并展示判定', async ({ page }) => {
     const buffer = Buffer.from(

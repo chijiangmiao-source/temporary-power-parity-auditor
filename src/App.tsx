@@ -9,7 +9,13 @@ import {
 } from 'react';
 import { analyze } from './analyzer';
 import { EXAMPLE_JSON } from './example';
-import type { AnalyzeResult, CheckOutcome, ConflictWitness, Constraint } from './types';
+import type {
+  AnalyzeResult,
+  CheckOutcome,
+  ConflictWitness,
+  Constraint,
+  RefinedCycle,
+} from './types';
 
 const ROW_GAP = 10;
 const DEFAULT_ROW_H = 58;
@@ -57,22 +63,72 @@ function WitnessView({ witness }: { witness: ConflictWitness }) {
   );
 }
 
+/**
+ * 精炼最短回路：约束条数最少的相位矛盾闭环，与约束加入顺序无关。
+ * 节点序列一律按环的遍历朝向呈现（约束对象自身的 a/b 朝向可能相反）。
+ */
+function RefinedCycleView({ cycle }: { cycle: RefinedCycle }) {
+  const chainXor = cycle.chain.reduce((a, e) => a ^ e.parity, 0);
+  return (
+    <div className="witness witness-refined" data-testid="refined-panel">
+      <div className="witness-title">
+        精炼最短回路：共 {cycle.length} 条约束
+        （同长度候选按环上约束 id 的规范化循环序列决胜）
+      </div>
+      {cycle.length === 1 ? (
+        <div className="witness-line" data-testid="refined-selfloop">
+          反相自环：节点<code>{cycle.nodes[0]}</code>通过约束
+          <code>{cycle.closing.id}</code>与自身反相，位权异或为 1，不可能满足。
+        </div>
+      ) : (
+        <ol className="witness-chain">
+          {cycle.chain.map((c, i) => (
+            <li key={i} data-testid="refined-step">
+              <code>{cycle.nodes[i]}</code>
+              <span className={`rel rel-${c.relation}`}>{relationText(c)}</span>
+              <code>{cycle.nodes[i + 1]}</code>
+              <span className="edge-id">（约束 {c.id}）</span>
+            </li>
+          ))}
+          <li className="closing" data-testid="refined-closing">
+            闭合边：
+            <code>{cycle.nodes[cycle.length - 1]}</code>
+            <span className={`rel rel-${cycle.closing.relation}`}>
+              {relationText(cycle.closing)}
+            </span>
+            <code>{cycle.nodes[0]}</code>
+            <span className="edge-id">（约束 {cycle.closing.id}）</span>
+            ——链上位权异或 {chainXor} ⊕ 闭合边 {cycle.closing.parity} = {cycle.xor}，为矛盾环。
+          </li>
+        </ol>
+      )}
+      <div className="canonical-line" data-testid="refined-canonical">
+        规范化 id 序列：{cycle.canonicalIds.map((id) => `约束 ${id}`).join(' → ')}
+      </div>
+    </div>
+  );
+}
+
 interface RowContentProps {
   check: CheckOutcome;
   isFirstConflict: boolean;
   expanded: boolean;
+  refinedOpen: boolean;
   result: AnalyzeResult;
   rowIndex: number;
   onToggle: (rowIndex: number) => void;
+  onRefine: (rowIndex: number) => void;
 }
 
 const CheckRowContent = memo(function CheckRowContent({
   check,
   isFirstConflict,
   expanded,
+  refinedOpen,
   result,
   rowIndex,
   onToggle,
+  onRefine,
 }: RowContentProps) {
   return (
     <div
@@ -105,8 +161,19 @@ const CheckRowContent = memo(function CheckRowContent({
             {expanded ? '收起矛盾回路' : '查看矛盾回路'}
           </button>
         )}
+        {!check.safe && (
+          <button
+            type="button"
+            className="btn-link btn-refine"
+            data-testid="refine-cycle"
+            onClick={() => onRefine(rowIndex)}
+          >
+            {refinedOpen ? '收起精炼回路' : '精炼最短回路'}
+          </button>
+        )}
       </div>
       {expanded && <WitnessView witness={result.getWitness(rowIndex)!} />}
+      {refinedOpen && <RefinedCycleView cycle={result.refineCycle(rowIndex)!} />}
     </div>
   );
 });
@@ -119,13 +186,17 @@ const CheckRowContent = memo(function CheckRowContent({
 function VirtualCheckList({
   result,
   expandedExtra,
+  refinedOpen,
   onToggle,
+  onRefine,
   jumpNonce,
   registerViewport,
 }: {
   result: AnalyzeResult;
   expandedExtra: Set<number>;
+  refinedOpen: Set<number>;
   onToggle: (i: number) => void;
+  onRefine: (i: number) => void;
   jumpNonce: number;
   registerViewport: (el: HTMLDivElement | null) => void;
 }) {
@@ -282,9 +353,11 @@ function VirtualCheckList({
           check={check}
           isFirstConflict={isFirst}
           expanded={expanded}
+          refinedOpen={!check.safe && refinedOpen.has(i)}
           result={result}
           rowIndex={i}
           onToggle={onToggle}
+          onRefine={onRefine}
         />
       </div>,
     );
@@ -313,17 +386,43 @@ export function App() {
   const deferredText = useDeferredValue(text);
   // 用户手动展开/收起的非最早冲突检查点
   const [expandedExtra, setExpandedExtra] = useState<Set<number>>(new Set());
+  // 用户手动触发精炼最短回路的冲突检查点
+  const [refinedOpen, setRefinedOpen] = useState<Set<number>>(new Set());
+  // 本次会话是否曾触发过精炼；一旦触发过，后续每次输入变化都提示重新触发
+  const [everRefined, setEverRefined] = useState(false);
+  // 输入变化致旧精炼结果失效时，提示用户重新触发
+  const [refineHint, setRefineHint] = useState(false);
   const [jumpNonce, setJumpNonce] = useState(0);
   const fileRef = useRef<HTMLInputElement>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
   // 纯前端实时分析：输入始终保留，错误反馈附序位便于就地修正
   const result = useMemo(() => analyze(deferredText), [deferredText]);
-  // 输入变化后收起手动展开项并复位跳转状态
+  // 输入变化后收起手动展开项并复位跳转状态；
+  // analyze 结果随输入整体重建，精炼缓存随之失效；曾触发过精炼则提示重新触发。
+  // 仅在文本真正变化时复位，避免 refine 点击改变 everRefined 时误收起。
+  const prevTextRef = useRef(deferredText);
   useEffect(() => {
+    if (prevTextRef.current === deferredText) return;
+    prevTextRef.current = deferredText;
     setExpandedExtra(new Set());
     setJumpNonce(0);
-  }, [deferredText]);
+    if (everRefined) {
+      setRefinedOpen(new Set());
+      setRefineHint(true);
+    }
+  }, [deferredText, everRefined]);
+
+  const onRefine = (i: number) => {
+    setEverRefined(true);
+    setRefineHint(false);
+    setRefinedOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+  };
 
   const onImportFile = async (file: File | undefined) => {
     if (!file) return;
@@ -428,6 +527,12 @@ export function App() {
             )}
           </div>
 
+          {refineHint && conflictCount > 0 && (
+            <div className="refine-hint" data-testid="refine-hint">
+              输入已变化：此前精炼的最短回路结果已随旧检查点清除，请在需要的 conflict 行重新点击“精炼最短回路”。
+            </div>
+          )}
+
           {result.checks.length === 0 ? (
             <p className="empty-hint" data-testid="empty-hint">
               {isEmpty
@@ -438,6 +543,8 @@ export function App() {
             <VirtualCheckList
               result={result}
               expandedExtra={expandedExtra}
+              refinedOpen={refinedOpen}
+              onRefine={onRefine}
               onToggle={(i) =>
                 setExpandedExtra((prev) => {
                   const next = new Set(prev);
